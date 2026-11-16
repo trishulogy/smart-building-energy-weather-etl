@@ -1,0 +1,64 @@
+name: Smart Building Energy & Weather ETL Pipeline
+
+on:
+  schedule:
+    # Runs every 6 hours UTC
+    - cron: '0 */6 * * *'
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  run-etl-and-quality-gate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Unit & Idempotency Tests (Pytest)
+        env:
+          PYTHONPATH: .
+        run: pytest -v
+
+      - name: Execute ETL Pipeline & Data Quality Gate (>=95% SLA)
+        env:
+          PYTHONPATH: .
+        run: python src/etl_pipeline.py
+
+      - name: Inspect Star Schema Warehouse Summary
+        run: |
+          python -c "
+          import sqlite3
+          conn = sqlite3.connect('warehouse/building_telemetry.db')
+          print('--- ETL RUN AUDIT ---')
+          for row in conn.execute('SELECT * FROM etl_run_audit'):
+              print(row)
+          print('--- QUARANTINED ANOMALIES ---')
+          for row in conn.execute('SELECT zone_id, failure_reason FROM quarantine_logs'):
+              print(row)
+          print('--- ZONE ENERGY SUMMARY ---')
+          query = '''
+            SELECT z.zone_id, z.zone_name, COUNT(*) as readings,
+                   ROUND(AVG(f.energy_kwh), 2) as avg_kwh,
+                   ROUND(AVG(f.thermal_delta_c), 2) as avg_thermal_delta
+            FROM fact_energy_telemetry f
+            JOIN dim_building_zone z ON f.zone_key = z.zone_key
+            GROUP BY z.zone_id, z.zone_name
+          '''
+          for row in conn.execute(query):
+              print(row)
+          "
